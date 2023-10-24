@@ -1,0 +1,208 @@
+---
+title: "Neuron PL Paper sc-RNAseq"
+output:
+  html_document: default
+  html: default
+date: "2023-10-13"
+---
+
+#Setup and load necessary R libraries
+```{r setup}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = FALSE,
+	warning = FALSE
+)
+library(Seurat)
+library(SeuratObject)
+library(SeuratWrappers)
+library(shiny)
+library(viridis)
+library(scales)
+library(scico)
+library(ggplot2)
+library(patchwork)
+library(sctransform)
+library(tidyverse)
+library(tidyr)
+library(writexl)
+library(RColorBrewer)
+library(viridis)
+```
+
+#Creating Seurat Object (filename = path to h5 Matrix from CellRanger on J.K. Baroudi device)
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+#'mspl' = Mouse paralaminar (region)
+# For the code below, ensure you define the path to where "mspl_aggregated_matrix.h5" is located on your local machine
+mspl.sparse.m <- Read10X_h5(filename = '/Users/judebaroudi1/Desktop/Sorrells Lab/RNASeq Analysis/Neuron Paper RNA Seq/mspl_aggregated_matrix.h5', use.names = TRUE, unique.features = TRUE)
+mspldata <- CreateSeuratObject(counts = mspl.sparse.m, project = "mspl", min.cells = 3, min.features = 200)
+```
+
+#Pre-processing & Quality Control
+##The final line in this code block generates 'mspldata1.rds'. For further exploration of the dataset, please load 'mspldata1.rds' as an object in your environment, and begin analysis AFTER this block - no need to rerun QC.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+# Finding Mitochondrial Ratio
+
+mito.genes <- grep("^mt-", rownames(mspldata), value = TRUE)
+percent.mito <- Matrix::colSums(mspldata[mito.genes, ]) / Matrix::colSums(mspldata)
+mspldata <- AddMetaData(mspldata, metadata = percent.mito, col.name = "percent.mito")
+
+# Quality Control (Filtering and Normalization)
+mspldata <- subset(mspldata, subset = nCount_RNA > 4000 & 
+                                      nCount_RNA < 30000 & 
+                                      nFeature_RNA > 2000 & 
+                                      percent.mito < 0.1)
+
+# Normalization
+# LogNormal transform 
+
+mspldata <- NormalizeData(mspldata, assay="RNA", normalization.method = "LogNormalize", scale.factor = median(mspldata@meta.data$nFeature_RNA)) 
+
+# SCtransform is an updated methodology and better for analyzing lowly expressed genes
+
+mspldata <- SCTransform(mspldata)%>% RunPCA() %>% FindNeighbors(dims = 1:30) %>% 
+  RunUMAP(dims = 1:30) %>% FindClusters(resolution = c(0.8, 1, 1.5))
+DimPlot(mspldata, label = T) + coord_fixed()
+
+postqccellcount <- mspldata@meta.data %>% group_by(seurat_clusters) %>% summarize(count = n())
+print(postqccellcount)
+sum(postqccellcount[2])
+# Cells after initial QC left for downstream analysis = 20,345
+
+# Elimination of Remaining Doublets (Neuronal/Glial Clusters; exclude 11,13,16)
+
+mspldata1 <- subset(mspldata, idents = c("0":"10", "12", "14", "15", "17":"38")) 
+mspldata1 <- mspldata1 %>% RunPCA() %>% FindNeighbors(dims = 1:30) %>% 
+  RunUMAP(dims = 1:30) %>% FindClusters()
+
+saveRDS(mspldata1, file = "mspldata1.rds")
+```
+
+#Analysis for Manuscript Figure 
+##Please start with this code block for re-analysis; File > Open > "mspldata1.rds" > Load as Object named "mspldata1".
+
+#Supplementary Figure 4A-C
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+#Supplementary Figure 4a
+fix.sc <- scale_color_viridis(alpha = 1, option = "A")
+simple <- NoLegend() + NoAxes()
+
+overallcellcount <- mspldata1@meta.data %>% group_by(seurat_clusters) %>% summarize(count = n())
+print(overallcellcount)
+sum(overallcellcount[2])
+# 18188 total cells in sample post-QC
+DimPlot(mspldata1, label = T) + coord_fixed()
+##ggsave(filename = "user/path/FigS4b.pdf", width = 8, height = 8)
+
+#Supplementary Figure 4b
+p1 <- FeaturePlot(mspldata1, features = c("Syt1", "Ptprc", "Cldn5","Cspg4"),pt.size = 1, combine = FALSE, order = T)
+p1 <- lapply(p1, function (x) x + coord_fixed() + fix.sc + simple)
+wrap_plots(p1)
+##ggsave(filename = "user/path/FigS4b.pdf", width = 12, height = 12)
+
+#Supplementary Figure 4c
+cellidentificationmarkers <- c("Mki67", "Hopx" ,"Tnc", "Aldh1l1", "Fgfr3", "Aqp4", "Aldoc", "Gfap", "Eomes","Ascl1", "Olig2", "Dcx", "Pdgfra", "Cspg4", "Nes", "Vim", "Tie1", "Cldn5","Tmem119", "Itgam", "Ptprc", "Rbfox3", "Syt1")
+DotPlot(mspldata1, features = cellidentificationmarkers) +coord_flip() + scale_color_distiller(type = "div", palette = "RdBu", direction = -1, limits = c(-2.5, 2.5))
+##ggsave(filename = "user/path/FigS4c.pdf", width = 9, height = 5.5)
+```
+
+#Mouse Neuronal Sub-Clustering for Use in Supplementary Figure 4D-E, Main Figure 2N and 2O.
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+#Sub-Clustering of Mouse Neurons and Visualization >>> Sub-clusters chosen based on neuronal gene expression
+
+mspldataneurons <- subset(mspldata1, idents = c("11","14","17","19","21","24"))
+mspldataneurons <- mspldataneurons %>% RunPCA() %>% FindNeighbors(dims = 1:10) %>% 
+  RunUMAP(dims = 1:10) %>% FindClusters()
+
+neuroninterest.genes <- c("Rbfox3", "Nrcam","Syn1","Syt1", "Map2", "Gfap", "Aqp4", "Aldh1l1","S100b","Vim", "Cldn5", "Nes","Olig1", "Olig2", "Pdgfra", "Cspg4", "Mki67", "Ptprc", "Aif1", "Itgam", "Tmem119", "Dcx", "St8sia2", "Tbr1","Sox11","Sox4", "Deptor", "Nr2f2","Nr2f1", "Bcl11b", "Foxp2","Satb2","Tshz1", "Tshz2", "Ascl1", "Robo1", "Gad1", "Gad2", "Ppp1r1b", "Slc17a6", "Slc17a7")
+
+DotPlot(object = mspldataneurons,features=neuroninterest.genes, assay = NULL, cols = c("lightgrey", "blue")) + theme(axis.text.x = element_text(size = 10, angle = 45, vjust = 1, hjust=1))
+
+# The above Dot Plot Reveals Non-Neuronal Identities in Clusters 10 and 11 due to the presence of non-neuronal hallmarks such as Ptprc, as well as Aif1. The below code sub-clusters once more to eliminate any residual non-neuronal cells.
+
+mspldataneurons1 <- subset(mspldataneurons, idents = c("0":"9"))
+mspldataneurons1 <- mspldataneurons1 %>% RunPCA() %>% FindNeighbors(dims = 1:10) %>% 
+  RunUMAP(dims = 1:10) %>% FindClusters()
+```
+
+#Supplementary Figure 4D,E
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+#Supplementary Figure 4d
+
+p1 <- FeaturePlot(mspldataneurons1, features = c("Syt1","Gad2", "Slc17a7", "Slc17a6", "Ppp1r1b", "Foxp2", "Satb2", "Tbr1"),pt.size = 2, combine = FALSE, order = T)
+p1 <- lapply(p1, function (x) x + coord_fixed() + simple + fix.sc)
+wrap_plots(p1)
+##ggsave(filename = "user/path/FigS4d.pdf", width = 15, height = 15)
+
+#Supplementary Figure 4e
+msplposnegmarkers <- c("Dcx", "Sox11", "Sox4", "Neurod2", "Stmn1", "Stmn2", "Epha3", "Bcl2", "Slc17a6", "Tbr1", "Nr2f2", "Bcl11b", "Gad2", "Foxp2", "Satb2", "Sp8", "Pax6", "Tshz1")
+p1 <- FeaturePlot(mspldataneurons1, features = msplposnegmarkers ,pt.size = 1, combine = FALSE, order = T)
+p1 <- lapply(p1, function (x) x + coord_fixed() + simple + fix.sc + xlim(6, 15) + ylim(5, 10))
+wrap_plots(p1)
+##ggsave(filename = "user/path/FigureS4e.pdf", width = 8, height = 8)
+```
+
+#Human Amygdala (Sorrells et. al. 2019) Neuronal Sub-clustering for use in Supplementary Figures 4F-H, Main Figure 2P
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+## File > Open > amygdata.rds file > load amygdata.rds as object named 'amygdata'. From Sorrells et al. 2019 (https://www.nature.com/articles/s41467-019-10765-1#Fig8)
+amygdata <- readRDS("~/Desktop/Sorrells Lab/RNASeq Analysis/amygdata.rds")
+humanamygdataneurons <- subset(amygdata, idents = c("0","5","6","8":"13","15":"18","20","22":"24","26","28":"30","32"))
+humanamygdataneurons <- humanamygdataneurons %>% RunPCA() %>% FindNeighbors(dims = 1:15) %>% 
+  RunUMAP(dims = 1:15) %>% FindClusters()
+```
+
+#Supplementary Figure 4F-H
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+#Supplementary Figure 4F
+DimPlot(humanamygdataneurons, label = T) + coord_fixed()
+##ggsave(filename = "user/path/FigureS4f.pdf", width = 8, height = 8)
+
+#Supplementary Figure 4G
+p1 <- FeaturePlot(humanamygdataneurons, features = c("SYT1","GAD2", "SLC17A7", "SLC17A6", "PPP1R1B", "FOXP2", "SATB2", "TBR1"),pt.size = 2, combine = FALSE, order = T)
+p1 <- lapply(p1, function (x) x + coord_fixed() + simple + fix.sc)
+wrap_plots(p1)
+##ggsave(filename = "user/path/FigS4g.pdf", width = 15, height = 15)
+
+#Supplementary Figure 4H
+humanplposnegmarkers <- toupper(msplposnegmarkers)
+p1 <- FeaturePlot(humanamygdataneurons, features = humanplposnegmarkers, pt.size = 0.1, combine = FALSE, order = T)
+p1 <- lapply(p1, function (x) x + coord_fixed() + fix.sc + simple + xlim(10, 13) + ylim(0, 4))
+wrap_plots(p1)
+##ggsave(filename = "user/path/FigS4h.pdf", width = 8, height = 8)
+```
+
+#Main Figure 2N-P
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+#Figure 2N
+DimPlot(mspldataneurons1, label = T) + coord_fixed()
+##ggsave(filename = user/path/Figure2N.pdf", width = 8, height = 8)
+
+#Figure 2o
+msplposnegmarkersdotplot <- c("Pax6", "Sp8", "Satb2", "Foxp2", "Gad2", "Bcl11b","Nr2f2", "Tbr1", "Slc17a6","Bcl2", "Epha3", "Stmn2", "Stmn1", "Neurod2", "Sox4", "Sox11", "Dcx")
+DotPlot(mspldataneurons1, features = msplposnegmarkersdotplot) +coord_flip() + scale_color_distiller(type = "div", palette = "RdBu", direction = -1)
+##ggsave(filename = "user/path/Figure2o.pdf", width = 5, height = 4.75)
+
+#Figure 2P
+humanplposnegmarkersdotplot <- toupper(msplposnegmarkersdotplot)
+DotPlot(humanamygdataneurons, features = humanplposnegmarkersdotplot) +coord_flip() + scale_color_distiller(type = "div", palette = "RdBu", direction = -1)
+##ggsave(filename = "user/path/Figure2P.pdf", width = 7.5, height = 4)
+```
+
+#Overall Neuronal Gene Expression Spreadsheets
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+
+all.genes <- rownames(mspldataneurons1)
+mspldataneurons1 <- ScaleData(mspldataneurons1, features = all.genes)
+msplneuron.markers <- FindAllMarkers(mspldataneurons1, assay = "RNA", only.pos = T)
+##write_xlsx(msplneuron.markers, path = 'user/path/msplneuron.markers.xlsx')
+
+all.genes <- rownames(humanamygdataneurons)
+humanamygdataneurons <- ScaleData(humanamygdataneurons, features = all.genes)
+humanamygneuron.markers <- FindAllMarkers(humanamygdataneurons, only.pos = T)
+write.table(humanamygneuron.markers, quote = F, row.names = F, col.names = F, "humanamygneuron.markers.txt", sep=",")
+##write_xlsx(humanamygneuron.markers, path = 'user/path/humanamygneuron.markers.xlsx')   
+
+###Both generated files from above were then filtered in Excel to only include genes with an adjusted p-value of 0.01 or below, then saved and submitted as part of the dataset.
+```
